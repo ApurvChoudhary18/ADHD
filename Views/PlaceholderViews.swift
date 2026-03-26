@@ -94,6 +94,7 @@ class SaveMemoryViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var isSaving = false
     @Published var isSaved = false
+    @Published var saveProgress: Double = 0.0
     
     private let memoryManager = MemoryManager.shared
     private let voiceInputManager = VoiceInputManager()
@@ -101,6 +102,10 @@ class SaveMemoryViewModel: ObservableObject {
     
     var canSave: Bool {
         !itemName.isEmpty && !locationDescription.isEmpty
+    }
+    
+    var captureProgress: Double {
+        Double(capturedFrameCount) / 10.0
     }
     
     func checkCameraPermission() async {
@@ -115,12 +120,14 @@ class SaveMemoryViewModel: ObservableObject {
         capturedFrames = []
         capturedFrameCount = 0
         isCapturing = true
+        saveProgress = 0.0
         
         cameraManager.startFrameCapture(count: 10) { [weak self] frame in
             Task { @MainActor in
                 guard let self = self else { return }
                 self.capturedFrames.append(frame)
                 self.capturedFrameCount = self.capturedFrames.count
+                self.saveProgress = self.captureProgress
                 
                 if self.capturedFrameCount >= 10 {
                     self.stopCapture()
@@ -149,28 +156,37 @@ class SaveMemoryViewModel: ObservableObject {
     func saveMemory() {
         stopCapture()
         isSaving = true
+        saveProgress = 0.3
         errorMessage = nil
         
         Task {
             do {
+                saveProgress = 0.5
+                
                 _ = try await memoryManager.saveMemory(
                     itemName: itemName,
                     locationDescription: locationDescription,
                     capturedFrames: capturedFrames,
                     notes: notes.isEmpty ? nil : notes
                 )
+                
                 await MainActor.run {
+                    self.saveProgress = 1.0
                     self.isSaving = false
                     self.isSaved = true
                     self.resetForm()
                     
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.isSaved = false
+                        withAnimation {
+                            self.isSaved = false
+                            self.saveProgress = 0.0
+                        }
                     }
                 }
             } catch {
                 await MainActor.run {
                     self.isSaving = false
+                    self.saveProgress = 0.0
                     self.errorMessage = error.localizedDescription
                 }
             }
@@ -306,7 +322,7 @@ struct MatchStateView: View {
     private var iconName: String {
         switch state {
         case .scanning:
-            return "scan"
+            return "viewfinder"
         case .gettingCloser:
             return "arrow.up.circle"
         case .possibleMatch:

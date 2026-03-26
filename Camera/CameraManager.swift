@@ -21,11 +21,12 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var capturedFrames: [UIImage] = []
     @Published var currentFrame: UIImage?
     @Published var isContinuousCaptureEnabled = false
+    @Published var permissionError: String?
     
     weak var delegate: CameraManagerDelegate?
     weak var frameDelegate: CameraFrameDelegate?
     
-    let session = AVCaptureSession()
+    let session: AVCaptureSession
     let previewLayer: AVCaptureVideoPreviewLayer
     
     private let videoOutput = AVCaptureVideoDataOutput()
@@ -42,20 +43,39 @@ final class CameraManager: NSObject, ObservableObject {
     private var continuousFrameCallback: ((UIImage) -> Void)?
     
     private override init() {
+        session = AVCaptureSession()
         previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer.videoGravity = .resizeAspectFill
         super.init()
     }
     
     func checkAuthorization() async {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        
+        switch status {
         case .authorized:
-            await MainActor.run { isAuthorized = true }
+            await MainActor.run {
+                self.isAuthorized = true
+                self.permissionError = nil
+            }
         case .notDetermined:
             let granted = await AVCaptureDevice.requestAccess(for: .video)
-            await MainActor.run { isAuthorized = granted }
-        default:
-            await MainActor.run { isAuthorized = false }
+            await MainActor.run {
+                self.isAuthorized = granted
+                if !granted {
+                    self.permissionError = "Camera access denied. Please enable in Settings."
+                }
+            }
+        case .denied, .restricted:
+            await MainActor.run {
+                self.isAuthorized = false
+                self.permissionError = "Camera access denied. Please enable in Settings."
+            }
+        @unknown default:
+            await MainActor.run {
+                self.isAuthorized = false
+                self.permissionError = "Unknown camera permission status."
+            }
         }
     }
     
@@ -66,54 +86,91 @@ final class CameraManager: NSObject, ObservableObject {
     }
     
     private func setupSession() {
-        session.beginConfiguration()
-        session.sessionPreset = .high
-        
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let videoInput = try? AVCaptureDeviceInput(device: videoDevice) else {
-            session.commitConfiguration()
+        guard !Thread.isMainThread else {
+            sessionQueue.async { [weak self] in
+                self?.setupSession()
+            }
             return
         }
         
-        if session.canAddInput(videoInput) {
-            session.addInput(videoInput)
+        session.beginConfiguration()
+        session.sessionPreset = .high
+        
+        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+            session.commitConfiguration()
+            print("[CameraManager] Failed to get video device")
+            return
         }
         
-        videoOutput.setSampleBufferDelegate(self, queue: processingQueue)
-        videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-        ]
-        
-        if session.canAddOutput(videoOutput) {
-            session.addOutput(videoOutput)
+        do {
+            let videoInput = try AVCaptureDeviceInput(device: videoDevice)
+            
+            if session.canAddInput(videoInput) {
+                session.addInput(videoInput)
+            } else {
+                print("[CameraManager] Cannot add video input")
+            }
+            
+            videoOutput.setSampleBufferDelegate(self, queue: processingQueue)
+            videoOutput.alwaysDiscardsLateVideoFrames = true
+            videoOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            
+            if session.canAddOutput(videoOutput) {
+                session.addOutput(videoOutput)
+            }
+            
+            if session.canAddOutput(photoOutput) {
+                session.addOutput(photoOutput)
+                photoOutput.isHighResolutionCaptureEnabled = true
+            }
+            
+            session.commitConfiguration()
+            print("[CameraManager] Session configured successfully")
+            
+        } catch {
+            print("[CameraManager] Failed to setup session: \(error)")
+            session.commitConfiguration()
         }
-        
-        if session.canAddOutput(photoOutput) {
-            session.addOutput(photoOutput)
-            photoOutput.isHighResolutionCaptureEnabled = true
-        }
-        
-        session.commitConfiguration()
     }
     
     func startSession() {
         sessionQueue.async { [weak self] in
-            guard let self = self, !self.session.isRunning else { return }
+            guard let self = self else { return }
+            
+            if self.session.isRunning {
+                DispatchQueue.main.async {
+                    self.isSessionRunning = true
+                }
+                return
+            }
+            
             self.session.startRunning()
+            
             DispatchQueue.main.async {
                 self.isSessionRunning = self.session.isRunning
             }
+            
+            print("[CameraManager] Session started: \(self.session.isRunning)")
         }
     }
     
     func stopSession() {
         sessionQueue.async { [weak self] in
-            guard let self = self, self.session.isRunning else { return }
+            guard let self = self else { return }
+            
+            if !self.session.isRunning {
+                return
+            }
+            
             self.session.stopRunning()
+            
             DispatchQueue.main.async {
                 self.isSessionRunning = false
             }
+            
+            print("[CameraManager] Session stopped")
         }
     }
     
@@ -124,16 +181,26 @@ final class CameraManager: NSObject, ObservableObject {
     }
     
     func startFrameCapture(count: Int = 10, callback: @escaping (UIImage) -> Void) {
-        capturedFrames.removeAll()
-        frameCaptureCount = 0
-        targetFrameCount = count
-        isCapturingFrames = true
-        continuousFrameCallback = callback
+        DispatchQueue.main.async { [weak self] in
+            self?.capturedFrames.removeAll()
+            self?.frameCaptureCount = 0
+            self?.targetFrameCount = count
+            self?.isCapturingFrames = true
+            self?.continuousFrameCallback = callback
+        }
     }
     
     func stopFrameCapture() {
-        isCapturingFrames = false
-        continuousFrameCallback = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.isCapturingFrames = false
+            self?.continuousFrameCallback = nil
+        }
+    }
+    
+    func stopContinuousFrameCapture() {
+        DispatchQueue.main.async { [weak self] in
+            self?.isContinuousCaptureEnabled = false
+        }
     }
     
     func getLastFrame() -> UIImage? {
@@ -146,6 +213,7 @@ final class CameraManager: NSObject, ObservableObject {
     
     func setFrameCallback(_ callback: @escaping (UIImage) -> Void) {
         continuousFrameCallback = callback
+        isContinuousCaptureEnabled = true
     }
     
     private func shouldProcessFrame() -> Bool {

@@ -61,6 +61,11 @@ final class ScanRoomController: ObservableObject {
     private let lowMotionInterval: TimeInterval = 0.3
     private let stableInterval: TimeInterval = 0.2
     
+    private var recentScores: [Float] = []
+    private let scoreWindowSize = 15
+    private let throttleInterval: TimeInterval = 0.15
+    private var lastThrottleTime: Date = Date.distantPast
+    
     enum MotionLevel {
         case stable
         case low
@@ -195,25 +200,6 @@ final class ScanRoomController: ObservableObject {
         print("[Simulator] Match: \(randomMemory.itemName) - \(selectedState.rawValue) (\(String(format: "%.2f", similarityScore)))")
     }
     
-    func stopScanning() {
-        isScanning = false
-        scanTimer?.invalidate()
-        scanTimer = nil
-        simulatorTimer?.invalidate()
-        simulatorTimer = nil
-        cameraManager.stopContinuousFrameCapture()
-        cameraManager.stopSession()
-        
-        clearStabilityState()
-        
-        currentMatchState = .scanning
-        currentMatchResult = nil
-        lastProcessedFrame = nil
-        smoothedScore = 0.0
-        
-        print("[ScanRoomController] Stopped scanning")
-    }
-    
     private func resetMotionTracking() {
         previousFrame = nil
         motionHistory.removeAll()
@@ -260,6 +246,18 @@ final class ScanRoomController: ObservableObject {
         
         previousFrame = frame
         pendingFrame = frame
+        
+        processCurrentFrameThrottled()
+    }
+    
+    private func processCurrentFrameThrottled() {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastThrottleTime)
+        
+        guard elapsed >= throttleInterval else { return }
+        
+        lastThrottleTime = now
+        processCurrentFrame()
     }
     
     private func processCurrentFrame() {
@@ -312,7 +310,14 @@ final class ScanRoomController: ObservableObject {
                     return
                 }
                 
-                let smoothedScore = self.sceneMatcher.getSmoothedScore(for: bestMatch.memoryId) ?? bestMatch.aggregatedScore
+                let rawScore = bestMatch.aggregatedScore
+                
+                self.recentScores.append(rawScore)
+                if self.recentScores.count > self.scoreWindowSize {
+                    self.recentScores.removeFirst()
+                }
+                
+                let smoothedScore = self.calculateRollingAverage()
                 
                 await MainActor.run {
                     self.lastProcessedFrame = capturedFrame
@@ -432,6 +437,20 @@ final class ScanRoomController: ObservableObject {
     
     func setContext(_ locationDescription: String?) {
         sceneMatcher.setCurrentContext(locationDescription)
+    }
+    
+    private func calculateRollingAverage() -> Float {
+        guard !recentScores.isEmpty else { return 0 }
+        
+        let weights = recentScores.enumerated().map { Float($0.offset + 1) }
+        let totalWeight = weights.reduce(0, +)
+        
+        var weightedSum: Float = 0
+        for (index, score) in recentScores.enumerated() {
+            weightedSum += score * weights[index]
+        }
+        
+        return weightedSum / totalWeight
     }
     
     private func detectMotion(currentFrame: UIImage, previousFrame: UIImage?) -> Double {

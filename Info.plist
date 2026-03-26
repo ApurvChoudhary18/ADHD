@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>MemoryCam needs camera access to capture reference images for your saved memories and to scan your surroundings to find objects.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MemoryCam needs microphone access for voice input to search and add memories using your voice.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>MemoryCam uses speech recognition to convert your voice commands into text for searching and adding memories.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>MemoryCam may access your photo library to save reference images for memories.</string>
+</dict>
+</plist>

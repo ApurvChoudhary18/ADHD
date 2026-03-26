@@ -17,9 +17,13 @@ protocol VoiceInputManagerDelegate: AnyObject {
 }
 
 final class VoiceInputManager: ObservableObject {
+    static let shared = VoiceInputManager()
+    
     @Published var isAuthorized = false
+    @Published var isMicrophoneAuthorized = false
     @Published var isListening = false
     @Published var currentTranscript = ""
+    @Published var authorizationError: String?
     
     var onResult: ((String) -> Void)?
     
@@ -33,15 +37,42 @@ final class VoiceInputManager: ObservableObject {
     private let itemKeywords = ["my", "the", "a", "an"]
     private let locationKeywords = ["in", "at", "on", "near", "under", "behind", "inside", "outside"]
     
-    init(locale: Locale = .current) {
+    private init(locale: Locale = .current) {
         speechRecognizer = SFSpeechRecognizer(locale: locale)
     }
     
-    func requestAuthorization() async {
+    func requestAuthorization() async -> Bool {
+        async let speechStatus: Void = requestSpeechAuthorization()
+        async let micStatus: Void = requestMicrophoneAuthorization()
+        
+        await speechStatus
+        await micStatus
+        
+        return isAuthorized && isMicrophoneAuthorized
+    }
+    
+    private func requestSpeechAuthorization() async {
         await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
+            SFSpeechRecognizer.requestAuthorization { [weak self] status in
                 DispatchQueue.main.async {
-                    self.isAuthorized = (status == .authorized)
+                    self?.isAuthorized = (status == .authorized)
+                    if status != .authorized {
+                        self?.authorizationError = "Speech recognition not authorized. Please enable in Settings."
+                    }
+                    continuation.resume()
+                }
+            }
+        }
+    }
+    
+    private func requestMicrophoneAuthorization() async {
+        await withCheckedContinuation { continuation in
+            AVAudioApplication.requestRecordPermission { granted in
+                DispatchQueue.main.async {
+                    self.isMicrophoneAuthorized = granted
+                    if !granted {
+                        self.authorizationError = "Microphone access denied. Please enable in Settings."
+                    }
                     continuation.resume()
                 }
             }
@@ -49,12 +80,18 @@ final class VoiceInputManager: ObservableObject {
     }
     
     func startListening() throws {
-        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
-            throw VoiceInputError.recognizerNotAvailable
+        guard !authorizationError.isEmptyOrNil else {
+            if !isAuthorized {
+                throw VoiceInputError.notAuthorized
+            }
+            if !isMicrophoneAuthorized {
+                throw VoiceInputError.microphoneNotAuthorized
+            }
+            throw VoiceInputError.notAuthorized
         }
         
-        guard isAuthorized else {
-            throw VoiceInputError.notAuthorized
+        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
+            throw VoiceInputError.recognizerNotAvailable
         }
         
         if recognitionTask != nil {
@@ -62,9 +99,14 @@ final class VoiceInputManager: ObservableObject {
             recognitionTask = nil
         }
         
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
-        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("[VoiceInputManager] Audio session setup failed: \(error)")
+            throw VoiceInputError.audioSessionFailed
+        }
         
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         
@@ -77,12 +119,23 @@ final class VoiceInputManager: ObservableObject {
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         
+        guard recordingFormat.sampleRate > 0 else {
+            throw VoiceInputError.audioSessionFailed
+        }
+        
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
             self?.recognitionRequest?.append(buffer)
         }
         
         audioEngine.prepare()
-        try audioEngine.start()
+        
+        do {
+            try audioEngine.start()
+        } catch {
+            print("[VoiceInputManager] Audio engine failed to start: \(error)")
+            inputNode.removeTap(onBus: 0)
+            throw VoiceInputError.audioSessionFailed
+        }
         
         recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
             guard let self = self else { return }
@@ -104,6 +157,7 @@ final class VoiceInputManager: ObservableObject {
             if let error = error {
                 DispatchQueue.main.async {
                     self.delegate?.voiceInputManager(self, didFailWithError: error)
+                    self.stopListening()
                 }
             }
         }
@@ -115,6 +169,8 @@ final class VoiceInputManager: ObservableObject {
     }
     
     func stopListening() {
+        guard isListening else { return }
+        
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         
@@ -124,9 +180,11 @@ final class VoiceInputManager: ObservableObject {
         recognitionTask?.cancel()
         recognitionTask = nil
         
-        DispatchQueue.main.async {
-            self.isListening = false
-            self.delegate?.voiceInputManagerDidStopListening(self)
+        DispatchQueue.main.async { [weak self] in
+            self?.isListening = false
+            if let self = self {
+                self.delegate?.voiceInputManagerDidStopListening(self)
+            }
         }
     }
     
@@ -188,6 +246,7 @@ final class VoiceInputManager: ObservableObject {
 
 enum VoiceInputError: LocalizedError {
     case notAuthorized
+    case microphoneNotAuthorized
     case recognizerNotAvailable
     case requestCreationFailed
     case audioSessionFailed
@@ -195,7 +254,9 @@ enum VoiceInputError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notAuthorized:
-            return "Speech recognition not authorized"
+            return "Speech recognition not authorized. Please enable in Settings."
+        case .microphoneNotAuthorized:
+            return "Microphone access denied. Please enable in Settings."
         case .recognizerNotAvailable:
             return "Speech recognizer not available"
         case .requestCreationFailed:
@@ -203,5 +264,11 @@ enum VoiceInputError: LocalizedError {
         case .audioSessionFailed:
             return "Failed to configure audio session"
         }
+    }
+}
+
+private extension Optional where Wrapped == String {
+    var isEmptyOrNil: Bool {
+        return self?.isEmpty ?? true
     }
 }

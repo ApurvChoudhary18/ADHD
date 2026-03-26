@@ -13,7 +13,7 @@ struct MemoryCamApp: App {
     
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootContentView()
                 .environmentObject(memoryManager)
                 .environmentObject(appState)
                 .onAppear {
@@ -48,6 +48,12 @@ struct MemoryCamApp: App {
     }
 }
 
+struct RootContentView: View {
+    var body: some View {
+        NewContentView()
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var isInitialized = false
@@ -62,16 +68,5 @@ final class AppState: ObservableObject {
     func stopScanning() {
         isScanning = false
         currentScanMemoryId = nil
-    }
-}
-
-struct ContentViewPlaceholder: View {
-    var body: some View {
-        VStack {
-            Text("MemoryCam")
-                .font(.largeTitle)
-            Text("Core modules loaded")
-                .foregroundColor(.secondary)
-        }
     }
 }
